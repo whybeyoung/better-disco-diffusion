@@ -583,14 +583,14 @@ class DiscoDiffusion():
 
             if args.perlin_init:
                 if args.perlin_mode == 'color':
-                    init = create_perlin_noise([1.5 ** -i * 0.5 for i in range(12)], 1, 1, False)
-                    init2 = create_perlin_noise([1.5 ** -i * 0.5 for i in range(8)], 4, 4, False)
+                    init = create_perlin_noise([1.5 ** -i * 0.5 for i in range(12)], 1, 1, False, self.device)
+                    init2 = create_perlin_noise([1.5 ** -i * 0.5 for i in range(8)], 4, 4, False, self.device)
                 elif args.perlin_mode == 'gray':
-                    init = create_perlin_noise([1.5 ** -i * 0.5 for i in range(12)], 1, 1, True)
-                    init2 = create_perlin_noise([1.5 ** -i * 0.5 for i in range(8)], 4, 4, True)
+                    init = create_perlin_noise([1.5 ** -i * 0.5 for i in range(12)], 1, 1, True, self.device)
+                    init2 = create_perlin_noise([1.5 ** -i * 0.5 for i in range(8)], 4, 4, True, self.device)
                 else:
-                    init = create_perlin_noise([1.5 ** -i * 0.5 for i in range(12)], 1, 1, False)
-                    init2 = create_perlin_noise([1.5 ** -i * 0.5 for i in range(8)], 4, 4, True)
+                    init = create_perlin_noise([1.5 ** -i * 0.5 for i in range(12)], 1, 1, False, self.device)
+                    init2 = create_perlin_noise([1.5 ** -i * 0.5 for i in range(8)], 4, 4, True, self.device)
                 # init = TF.to_tensor(init).add(TF.to_tensor(init2)).div(2).to(device)
                 init = TF.to_tensor(init).add(TF.to_tensor(init2)).div(2).to(self.device).unsqueeze(0).mul(2).sub(1)
                 del init2
