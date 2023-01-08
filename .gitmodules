@@ -1,0 +1,24 @@
+[submodule "AdaBins"]
+	path = AdaBins
+	url = https://github.com/shariqfarooq123/AdaBins.git
+[submodule "CLIP"]
+	path = CLIP
+	url = https://github.com/openai/CLIP
+[submodule "guided-diffusion"]
+	path = guided-diffusion
+	url = git@github.com:kostarion/guided-diffusion.git
+[submodule "disco-diffusion"]
+	path = disco-diffusion
+	url = git@github.com:alembics/disco-diffusion.git
+[submodule "MiDaS"]
+	path = MiDaS
+	url = git@github.com:isl-org/MiDaS.git
+[submodule "ResizeRight"]
+	path = ResizeRight
+	url = git@github.com:assafshocher/ResizeRight.git
+[submodule "pytorch3d-lite"]
+	path = pytorch3d-lite
+	url = git@github.com:MSFTserver/pytorch3d-lite.git
+[submodule "open_clip"]
+	path = open_clip
+	url = https://github.com/mlfoundations/open_clip.git
