@@ -84,6 +84,25 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 USE_ADABINS = True
 
+root_path = os.getcwd()
+PROJECT_DIR = os.path.abspath(root_path)
+setup_3rd_module(PROJECT_DIR)
+from model import *
+from CLIP import clip
+import open_clip
+from guided_diffusion.script_util import create_model_and_diffusion, model_and_diffusion_defaults
+from resize_right import resize
+import py3d_tools as p3dT
+import disco_xform_utils as dxf
+from midas.dpt_depth import DPTDepthModel
+from midas.midas_net import MidasNet
+from midas.midas_net_custom import MidasNet_small
+from midas.transforms import Resize, NormalizeImage, PrepareForNet
+
+# AdaBins stuff
+if USE_ADABINS:
+    from infer import InferenceHelper
+
 
 def split_prompts(prompts):
     prompt_series = pd.Series([np.nan for a in range(max_frames)])
@@ -219,9 +238,13 @@ else:
     rotation_3d_z = float(rotation_3d_z)
 
 
-class DiscoDiffusionRunner():
-    def __init__(self, root_path, device, angle=angle, init_image=init_image, translation_x=translation_x,
+class DiscoDiffusion():
+    def __init__(self, root_path, device, normalize, lpips_model, clip_models, steps=steps, angle=angle,
+                 init_image=init_image,
+                 image_name='image.png',
+                 translation_x=translation_x,
                  translation_y=translation_y, init_scale=init_scale, skip_steps=skip_steps, zoom=zoom):
+        self.image_name = image_name
         self.is_colab = False
         self.google_drive = False
         self.save_models_to_google_drive = False
@@ -240,10 +263,20 @@ class DiscoDiffusionRunner():
         # 这啥玩意？
         self.cutout_debug = False
         self.padargs = {}
+        self.normalize = normalize
+        self.lpips_model = lpips_model
         # 初始化一些目录
         self.create_dirs()
         self.setup_env()
         self.setup_some_args(angle, init_image, translation_x, translation_y, init_scale, skip_steps, zoom)
+        # seed
+        if set_seed == 'random_seed':
+            random.seed()
+            self.seed = random.randint(0, 2 ** 32)
+            # print(f'Using seed: {seed}')
+        else:
+            self.seed = int(set_seed)
+        self.clip_models = clip_models
         ## gpu set
         self.device = device
         if not self.useCPU:
@@ -259,7 +292,6 @@ class DiscoDiffusionRunner():
             "dpt_large": f"{self.model_path}/dpt_large-midas-2f21e586.pt",
             "dpt_hybrid": f"{self.model_path}/dpt_hybrid-midas-501f0c75.pt",
             "dpt_hybrid_nyu": f"{self.model_path}/dpt_hybrid_nyu-2ce69ec7.pt", }
-        self.setup_model_config()
 
     def setup_some_args(self, angle, init_image, translation_x, translation_y, init_scale, skip_steps, zoom):
         self.angle = angle
@@ -356,6 +388,9 @@ class DiscoDiffusionRunner():
         print(f"MiDaS '{midas_model_type}' depth model initialized.")
         return midas_model, midas_transform, net_w, net_h, resize_mode, normalization
 
+    def setup_output_image(self, name):
+        self.image_name = name
+
     def create_dirs(self):
         createPath(self.initDirPath)
         createPath(self.outDirPath)
@@ -368,7 +403,8 @@ class DiscoDiffusionRunner():
         # If running locally, there's a good chance your env will need this in order to not crash upon np.matmul() or similar operations.
         os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
-    def run(self):
+    def do_run(self, args, ):
+        image_name = self.image_name
         check_nvidia()
         start_frame = 0
         batchNum = len(glob(self.batchFolder + "/*.txt"))
@@ -378,117 +414,12 @@ class DiscoDiffusionRunner():
 
         print(f'Starting Run: {batch_name}({batchNum}) at frame {start_frame}')
         self.batchNum = batchNum
-        
-        if set_seed == 'random_seed':
-            random.seed()
-            seed = random.randint(0, 2 ** 32)
-            # print(f'Using seed: {seed}')
-        else:
-            seed = int(set_seed)
-
-        args = {
-            'batchNum': batchNum,
-            'prompts_series': split_prompts(text_prompts) if text_prompts else None,
-            'image_prompts_series': split_prompts(image_prompts) if image_prompts else None,
-            'seed': seed,
-            'display_rate': display_rate,
-            'n_batches': n_batches if animation_mode == 'None' else 1,
-            'batch_size': batch_size,
-            'batch_name': batch_name,
-            'steps': steps,
-            'diffusion_sampling_mode': diffusion_sampling_mode,
-            'width_height': width_height,
-            'clip_guidance_scale': clip_guidance_scale,
-            'tv_scale': tv_scale,
-            'range_scale': range_scale,
-            'sat_scale': sat_scale,
-            'cutn_batches': cutn_batches,
-            'init_image': self.init_image,
-            'init_scale': self.init_scale,
-            'skip_steps': self.skip_steps,
-            'side_x': side_x,
-            'side_y': side_y,
-            'timestep_respacing': self.timestep_respacing,
-            'diffusion_steps': self.diffusion_steps,
-            'animation_mode': animation_mode,
-            'video_init_path': video_init_path,
-            'extract_nth_frame': extract_nth_frame,
-            'video_init_seed_continuity': video_init_seed_continuity,
-            'key_frames': key_frames,
-            'max_frames': max_frames if animation_mode != "None" else 1,
-            'interp_spline': interp_spline,
-            'start_frame': start_frame,
-            'angle': self.angle,
-            'zoom': self.zoom,
-            'translation_x': self.translation_x,
-            'translation_y': self.translation_y,
-            'translation_z': translation_z,
-            'rotation_3d_x': rotation_3d_x,
-            'rotation_3d_y': rotation_3d_y,
-            'rotation_3d_z': rotation_3d_z,
-            'midas_depth_model': midas_depth_model,
-            'midas_weight': midas_weight,
-            'near_plane': near_plane,
-            'far_plane': far_plane,
-            'fov': fov,
-            'padding_mode': padding_mode,
-            'sampling_mode': sampling_mode,
-            'angle_series': angle_series,
-            'zoom_series': zoom_series,
-            'translation_x_series': translation_x_series,
-            'translation_y_series': translation_y_series,
-            'translation_z_series': translation_z_series,
-            'rotation_3d_x_series': rotation_3d_x_series,
-            'rotation_3d_y_series': rotation_3d_y_series,
-            'rotation_3d_z_series': rotation_3d_z_series,
-            'frames_scale': frames_scale,
-            'skip_step_ratio': skip_step_ratio,
-            'calc_frames_skip_steps': calc_frames_skip_steps,
-            'text_prompts': text_prompts,
-            'image_prompts': image_prompts,
-            'cut_overview': eval(cut_overview),
-            'cut_innercut': eval(cut_innercut),
-            'cut_ic_pow': eval(cut_ic_pow),
-            'cut_icgray_p': eval(cut_icgray_p),
-            'intermediate_saves': intermediate_saves,
-            'intermediates_in_subfolder': intermediates_in_subfolder,
-            'steps_per_checkpoint': steps_per_checkpoint,
-            'perlin_init': perlin_init,
-            'perlin_mode': perlin_mode,
-            'set_seed': set_seed,
-            'eta': eta,
-            'clamp_grad': clamp_grad,
-            'clamp_max': clamp_max,
-            'skip_augs': skip_augs,
-            'randomize_class': randomize_class,
-            'clip_denoised': clip_denoised,
-            'fuzzy_prompt': fuzzy_prompt,
-            'rand_mag': rand_mag,
-            'turbo_mode': turbo_mode,
-            'turbo_steps': turbo_steps,
-            'turbo_preroll': turbo_preroll,
-            'use_vertical_symmetry': use_vertical_symmetry,
-            'use_horizontal_symmetry': use_horizontal_symmetry,
-            'transformation_percent': transformation_percent,
-            # video init settings
-            'video_init_steps': video_init_steps,
-            'video_init_clip_guidance_scale': video_init_clip_guidance_scale,
-            'video_init_tv_scale': video_init_tv_scale,
-            'video_init_range_scale': video_init_range_scale,
-            'video_init_sat_scale': video_init_sat_scale,
-            'video_init_cutn_batches': video_init_cutn_batches,
-            'video_init_skip_steps': video_init_skip_steps,
-            'video_init_frames_scale': video_init_frames_scale,
-            'video_init_frames_skip_steps': video_init_frames_skip_steps,
-            # warp settings
-            'video_init_flow_warp': video_init_flow_warp,
-            'video_init_flow_blend': video_init_flow_blend,
-            'video_init_check_consistency': video_init_check_consistency,
-            'video_init_blend_mode': video_init_blend_mode
-        }
+        args['batchNum'] = batchNum
+        args['start_frame'] = start_frame
 
         args = SimpleNamespace(**args)
-
+        self.args = args
+        self.steps = args.steps
         print('Prepping model...')
         model, diffusion = create_model_and_diffusion(**self.model_config)
         if diffusion_model == 'custom':
@@ -498,7 +429,7 @@ class DiscoDiffusionRunner():
             print("loading %s" % m)
             model.load_state_dict(
                 torch.load(m, map_location='cpu'))
-        model.requires_grad_(False).eval().to(device)
+        model.requires_grad_(False).eval().to(self.device)
         for name, param in model.named_parameters():
             if 'qkv' in name or 'norm' in name or 'proj' in name:
                 param.requires_grad_()
@@ -547,7 +478,7 @@ class DiscoDiffusionRunner():
 
                 if frame_num > 0:
                     seed += 1
-                    if resume_run and frame_num == start_frame:
+                    if args.resume_run and frame_num == start_frame:
                         img_0 = cv2.imread(self.batchFolder + f"/{batch_name}({batchNum})_{start_frame - 1:04}.png")
                     else:
                         img_0 = cv2.imread('prevFrame.png')
@@ -601,14 +532,14 @@ class DiscoDiffusionRunner():
             print(f'Frame {frame_num} Prompt: {frame_prompt}')
 
             model_stats = []
-            for clip_model in clip_models:
+            for clip_model in self.clip_models:
                 cutn = 16
                 model_stat = {"clip_model": None, "target_embeds": [], "make_cutouts": None, "weights": []}
                 model_stat["clip_model"] = clip_model
 
                 for prompt in frame_prompt:
                     txt, weight = parse_prompt(prompt)
-                    txt = clip_model.encode_text(clip.tokenize(prompt).to(device)).float()
+                    txt = clip_model.encode_text(clip.tokenize(prompt).to(self.device)).float()
 
                     if args.fuzzy_prompt:
                         for i in range(25):
@@ -626,8 +557,8 @@ class DiscoDiffusionRunner():
                         path, weight = parse_prompt(prompt)
                         img = Image.open(fetch(path)).convert('RGB')
                         img = TF.resize(img, min(side_x, side_y, *img.size), T.InterpolationMode.LANCZOS)
-                        batch = model_stat["make_cutouts"](TF.to_tensor(img).to(device).unsqueeze(0).mul(2).sub(1))
-                        embed = clip_model.encode_image(normalize(batch)).float()
+                        batch = model_stat["make_cutouts"](TF.to_tensor(img).to(self.device).unsqueeze(0).mul(2).sub(1))
+                        embed = clip_model.encode_image(self.normalize(batch)).float()
                         if fuzzy_prompt:
                             for i in range(25):
                                 model_stat["target_embeds"].append(
@@ -638,7 +569,7 @@ class DiscoDiffusionRunner():
                             model_stat["weights"].extend([weight / cutn] * cutn)
 
                 model_stat["target_embeds"] = torch.cat(model_stat["target_embeds"])
-                model_stat["weights"] = torch.tensor(model_stat["weights"], device=device)
+                model_stat["weights"] = torch.tensor(model_stat["weights"], device=self.device)
                 if model_stat["weights"].sum().abs() < 1e-3:
                     raise RuntimeError('The weights must not sum to 0.')
                 model_stat["weights"] /= model_stat["weights"].sum().abs()
@@ -648,7 +579,7 @@ class DiscoDiffusionRunner():
             if init_image is not None:
                 init = Image.open(fetch(init_image)).convert('RGB')
                 init = init.resize((args.side_x, args.side_y), Image.LANCZOS)
-                init = TF.to_tensor(init).to(device).unsqueeze(0).mul(2).sub(1)
+                init = TF.to_tensor(init).to(self.device).unsqueeze(0).mul(2).sub(1)
 
             if args.perlin_init:
                 if args.perlin_mode == 'color':
@@ -661,7 +592,7 @@ class DiscoDiffusionRunner():
                     init = create_perlin_noise([1.5 ** -i * 0.5 for i in range(12)], 1, 1, False)
                     init2 = create_perlin_noise([1.5 ** -i * 0.5 for i in range(8)], 4, 4, True)
                 # init = TF.to_tensor(init).add(TF.to_tensor(init2)).div(2).to(device)
-                init = TF.to_tensor(init).add(TF.to_tensor(init2)).div(2).to(device).unsqueeze(0).mul(2).sub(1)
+                init = TF.to_tensor(init).add(TF.to_tensor(init2)).div(2).to(self.device).unsqueeze(0).mul(2).sub(1)
                 del init2
 
             cur_t = None
@@ -672,8 +603,9 @@ class DiscoDiffusionRunner():
                     x = x.detach().requires_grad_()
                     n = x.shape[0]
                     if use_secondary_model is True:
-                        alpha = torch.tensor(diffusion.sqrt_alphas_cumprod[cur_t], device=device, dtype=torch.float32)
-                        sigma = torch.tensor(diffusion.sqrt_one_minus_alphas_cumprod[cur_t], device=device,
+                        alpha = torch.tensor(diffusion.sqrt_alphas_cumprod[cur_t], device=self.device,
+                                             dtype=torch.float32)
+                        sigma = torch.tensor(diffusion.sqrt_one_minus_alphas_cumprod[cur_t], device=self.device,
                                              dtype=torch.float32)
                         cosine_t = alpha_sigma_to_t(alpha, sigma)
                         out = self.secondary_model(x, cosine_t[None].repeat([n])).pred
@@ -681,7 +613,7 @@ class DiscoDiffusionRunner():
                         x_in = out * fac + x * (1 - fac)
                         x_in_grad = torch.zeros_like(x_in)
                     else:
-                        my_t = torch.ones([n], device=device, dtype=torch.long) * cur_t
+                        my_t = torch.ones([n], device=self.device, dtype=torch.long) * cur_t
                         out = diffusion.p_mean_variance(model, x, my_t, clip_denoised=False, model_kwargs={'y': y})
                         fac = diffusion.sqrt_one_minus_alphas_cumprod[cur_t]
                         x_in = out['pred_xstart'] * fac + x * (1 - fac)
@@ -702,7 +634,7 @@ class DiscoDiffusionRunner():
                                                     IC_Grey_P=args.cut_icgray_p[1000 - t_int],
                                                     cutout_debug=self.cutout_debug,
                                                     )
-                            clip_in = normalize(cuts(x_in.add(1).div(2)))
+                            clip_in = self.normalize(cuts(x_in.add(1).div(2)))
                             image_embeds = model_stat["clip_model"].encode_image(clip_in).float()
                             dists = spherical_dist_loss(image_embeds.unsqueeze(1),
                                                         model_stat["target_embeds"].unsqueeze(0))
@@ -719,7 +651,7 @@ class DiscoDiffusionRunner():
                     sat_losses = torch.abs(x_in - x_in.clamp(min=-1, max=1)).mean()
                     loss = tv_losses.sum() * tv_scale + range_losses.sum() * range_scale + sat_losses.sum() * sat_scale
                     if init is not None and init_scale:
-                        init_losses = lpips_model(x_in, init)
+                        init_losses = self.lpips_model(x_in, init)
                         loss = loss + init_losses.sum() * init_scale
                     x_in_grad += torch.autograd.grad(loss, x_in)[0]
                     if torch.isnan(x_in_grad).any() == False:
@@ -753,12 +685,12 @@ class DiscoDiffusionRunner():
                 total_steps = cur_t
 
                 if perlin_init:
-                    init = regen_perlin()
+                    init = regen_perlin(args.batch_size, self.device)
 
                 if args.diffusion_sampling_mode == 'ddim':
                     samples = sample_fn(
                         model,
-                        (batch_size, 3, args.side_y, args.side_x),
+                        (args.batch_size, 3, args.side_y, args.side_x),
                         clip_denoised=clip_denoised,
                         model_kwargs={},
                         cond_fn=cond_fn,
@@ -773,7 +705,7 @@ class DiscoDiffusionRunner():
                 else:
                     samples = sample_fn(
                         model,
-                        (batch_size, 3, args.side_y, args.side_x),
+                        (args.batch_size, 3, args.side_y, args.side_x),
                         clip_denoised=clip_denoised,
                         model_kwargs={},
                         cond_fn=cond_fn,
@@ -814,9 +746,9 @@ class DiscoDiffusionRunner():
                                             filename = f'{args.batch_name}({args.batchNum})_{i:04}-{j:03}.png'
                                 image = TF.to_pil_image(image.add(1).div(2).clamp(0, 1))
                                 if j % args.display_rate == 0 or cur_t == -1:
-                                    image.save('progress.png')
+                                    image.save(image_name)
                                     display.clear_output(wait=True)
-                                    display.display(display.Image('progress.png'))
+                                    display.display(display.Image(image_name))
                                 if args.steps_per_checkpoint is not None:
                                     if j % args.steps_per_checkpoint == 0 and j > 0:
                                         if args.intermediates_in_subfolder is True:
@@ -855,8 +787,8 @@ class DiscoDiffusionRunner():
 
     def save_settings(self):
         setting_list = {
-            'text_prompts': text_prompts,
-            'image_prompts': image_prompts,
+            'text_prompts': self.args.text_prompts,
+            'image_prompts': self.args.image_prompts,
             'clip_guidance_scale': clip_guidance_scale,
             'tv_scale': tv_scale,
             'range_scale': range_scale,
@@ -879,7 +811,7 @@ class DiscoDiffusionRunner():
             'clip_denoised': clip_denoised,
             'clamp_grad': clamp_grad,
             'clamp_max': clamp_max,
-            'seed': seed,
+            'seed': self.args.seed,
             'fuzzy_prompt': fuzzy_prompt,
             'rand_mag': rand_mag,
             'eta': eta,
@@ -887,7 +819,7 @@ class DiscoDiffusionRunner():
             'height': width_height[1],
             'diffusion_model': diffusion_model,
             'use_secondary_model': use_secondary_model,
-            'steps': steps,
+            'steps': self.steps,
             'diffusion_steps': self.diffusion_steps,
             'diffusion_sampling_mode': diffusion_sampling_mode,
             'ViTB32': ViTB32,
@@ -959,13 +891,11 @@ class DiscoDiffusionRunner():
             'video_init_blend_mode': video_init_blend_mode
         }
         # print('Settings:', setting_list)
-        with open(f"{self.batchFolder}/{batch_name}({self.batchNum})_settings.txt", "w+", encoding="utf-8") as f:  # save settings
+        with open(f"{self.batchFolder}/{batch_name}({self.batchNum})_settings.txt", "w+",
+                  encoding="utf-8") as f:  # save settings
             json.dump(setting_list, f, ensure_ascii=False, indent=4)
 
-    def setup_model_config(self):
-        # Update Model Settings
-        timestep_respacing = f'ddim{steps}'
-        diffusion_steps = (1000 // steps) * steps if steps < 1000 else steps
+    def setup_model_config(self, timestep_respacing, diffusion_steps):
         # model config
         model_config = model_and_diffusion_defaults()
         if diffusion_model == '512x512_diffusion_uncond_finetune_008100':
@@ -1084,7 +1014,7 @@ def perlin_ms(octaves, width, height, grayscale, device=None):
     return torch.cat(out_array)
 
 
-def create_perlin_noise(octaves=[1, 1, 1, 1], width=2, height=2, grayscale=True):
+def create_perlin_noise(octaves=[1, 1, 1, 1], width=2, height=2, grayscale=True, device='cpu'):
     out = perlin_ms(octaves, width, height, grayscale, device)
     if grayscale:
         out = TF.resize(size=(side_y, side_x), img=out.unsqueeze(0))
@@ -1098,119 +1028,265 @@ def create_perlin_noise(octaves=[1, 1, 1, 1], width=2, height=2, grayscale=True)
     return out
 
 
-def regen_perlin():
+def regen_perlin(batch_size=1, device='cpu'):
     if perlin_mode == 'color':
-        init = create_perlin_noise([1.5 ** -i * 0.5 for i in range(12)], 1, 1, False)
-        init2 = create_perlin_noise([1.5 ** -i * 0.5 for i in range(8)], 4, 4, False)
+        init = create_perlin_noise([1.5 ** -i * 0.5 for i in range(12)], 1, 1, False, device)
+        init2 = create_perlin_noise([1.5 ** -i * 0.5 for i in range(8)], 4, 4, False, device)
     elif perlin_mode == 'gray':
-        init = create_perlin_noise([1.5 ** -i * 0.5 for i in range(12)], 1, 1, True)
-        init2 = create_perlin_noise([1.5 ** -i * 0.5 for i in range(8)], 4, 4, True)
+        init = create_perlin_noise([1.5 ** -i * 0.5 for i in range(12)], 1, 1, True, device)
+        init2 = create_perlin_noise([1.5 ** -i * 0.5 for i in range(8)], 4, 4, True, device)
     else:
-        init = create_perlin_noise([1.5 ** -i * 0.5 for i in range(12)], 1, 1, False)
-        init2 = create_perlin_noise([1.5 ** -i * 0.5 for i in range(8)], 4, 4, True)
+        init = create_perlin_noise([1.5 ** -i * 0.5 for i in range(12)], 1, 1, False, device)
+        init2 = create_perlin_noise([1.5 ** -i * 0.5 for i in range(8)], 4, 4, True, device)
 
     init = TF.to_tensor(init).add(TF.to_tensor(init2)).div(2).to(device).unsqueeze(0).mul(2).sub(1)
     del init2
     return init.expand(batch_size, -1, -1, -1)
 
 
+def _build_args(text_prompts, image_prompts, seed, batch_size, steps, display_rate, batch_name, width_height, tv_scale,
+                range_scale,
+                sat_scale, cutn_batches, init_image, init_scale, skip_steps, side_x, side_y, timestep_respacing,
+                diffusion_steps, resume_run):
+    return {
+        'resume_run': resume_run,
+        'prompts_series': split_prompts(text_prompts) if text_prompts else None,
+        'image_prompts_series': split_prompts(image_prompts) if image_prompts else None,
+        'seed': seed,
+        'display_rate': display_rate,
+        'n_batches': n_batches if animation_mode == 'None' else 1,
+        'batch_size': batch_size,
+        'batch_name': batch_name,
+        'steps': steps,
+        'diffusion_sampling_mode': diffusion_sampling_mode,
+        'width_height': width_height,
+        'clip_guidance_scale': clip_guidance_scale,
+        'tv_scale': tv_scale,
+        'range_scale': range_scale,
+        'sat_scale': sat_scale,
+        'cutn_batches': cutn_batches,
+        'init_image': init_image,
+        'init_scale': init_scale,
+        'skip_steps': skip_steps,
+        'side_x': side_x,
+        'side_y': side_y,
+        'timestep_respacing': timestep_respacing,
+        'diffusion_steps': diffusion_steps,
+        'animation_mode': animation_mode,
+        'video_init_path': video_init_path,
+        'extract_nth_frame': extract_nth_frame,
+        'video_init_seed_continuity': video_init_seed_continuity,
+        'key_frames': key_frames,
+        'max_frames': max_frames if animation_mode != "None" else 1,
+        'interp_spline': interp_spline,
+        'angle': angle,
+        'zoom': zoom,
+        'translation_x': translation_x,
+        'translation_y': translation_y,
+        'translation_z': translation_z,
+        'rotation_3d_x': rotation_3d_x,
+        'rotation_3d_y': rotation_3d_y,
+        'rotation_3d_z': rotation_3d_z,
+        'midas_depth_model': midas_depth_model,
+        'midas_weight': midas_weight,
+        'near_plane': near_plane,
+        'far_plane': far_plane,
+        'fov': fov,
+        'padding_mode': padding_mode,
+        'sampling_mode': sampling_mode,
+        'angle_series': angle_series,
+        'zoom_series': zoom_series,
+        'translation_x_series': translation_x_series,
+        'translation_y_series': translation_y_series,
+        'translation_z_series': translation_z_series,
+        'rotation_3d_x_series': rotation_3d_x_series,
+        'rotation_3d_y_series': rotation_3d_y_series,
+        'rotation_3d_z_series': rotation_3d_z_series,
+        'frames_scale': frames_scale,
+        'skip_step_ratio': skip_step_ratio,
+        'calc_frames_skip_steps': math.floor(steps * skip_step_ratio)
+        ,
+        'text_prompts': text_prompts,
+        'image_prompts': image_prompts,
+        'cut_overview': eval(cut_overview),
+        'cut_innercut': eval(cut_innercut),
+        'cut_ic_pow': eval(cut_ic_pow),
+        'cut_icgray_p': eval(cut_icgray_p),
+        'intermediate_saves': intermediate_saves,
+        'intermediates_in_subfolder': intermediates_in_subfolder,
+        'steps_per_checkpoint': steps_per_checkpoint,
+        'perlin_init': perlin_init,
+        'perlin_mode': perlin_mode,
+        'set_seed': set_seed,
+        'eta': eta,
+        'clamp_grad': clamp_grad,
+        'clamp_max': clamp_max,
+        'skip_augs': skip_augs,
+        'randomize_class': randomize_class,
+        'clip_denoised': clip_denoised,
+        'fuzzy_prompt': fuzzy_prompt,
+        'rand_mag': rand_mag,
+        'turbo_mode': turbo_mode,
+        'turbo_steps': turbo_steps,
+        'turbo_preroll': turbo_preroll,
+        'use_vertical_symmetry': use_vertical_symmetry,
+        'use_horizontal_symmetry': use_horizontal_symmetry,
+        'transformation_percent': transformation_percent,
+        # video init settings
+        'video_init_steps': video_init_steps,
+        'video_init_clip_guidance_scale': video_init_clip_guidance_scale,
+        'video_init_tv_scale': video_init_tv_scale,
+        'video_init_range_scale': video_init_range_scale,
+        'video_init_sat_scale': video_init_sat_scale,
+        'video_init_cutn_batches': video_init_cutn_batches,
+        'video_init_skip_steps': video_init_skip_steps,
+        'video_init_frames_scale': video_init_frames_scale,
+        'video_init_frames_skip_steps': video_init_frames_skip_steps,
+        # warp settings
+        'video_init_flow_warp': video_init_flow_warp,
+        'video_init_flow_blend': video_init_flow_blend,
+        'video_init_check_consistency': video_init_check_consistency,
+        'video_init_blend_mode': video_init_blend_mode
+    }
+
+
+class DDRunner():
+    def __init__(self, text_prompts, batch_size=1, steps=steps):
+        self.text_prompts = text_prompts
+        self.batch_size = batch_size
+        self.steps = steps
+        MAX_ADABINS_AREA = 500000
+        device = torch.device('cuda:0' if (torch.cuda.is_available()) else 'cpu')
+        print('Using device:', device)
+        self.resume_run = False  # @param{type: 'boolean'}
+        run_to_resume = 'latest'  # @param{type: 'string'}
+        resume_from_frame = 'latest'  # @param{type: 'string'}
+        retain_overwritten_frames = False  # @param{type: 'boolean'}
+
+        self.image_prompts = {
+            # 0:['ImagePromptsWorkButArentVeryGood.png:2',],
+        }
+
+        self.display_rate = 20  # @param{type: 'number'}
+
+        # clip set
+        clip_models = []
+        if ViTB32: clip_models.append(clip.load('ViT-B/32', jit=False)[0].eval().requires_grad_(False).to(device))
+        if ViTB16: clip_models.append(clip.load('ViT-B/16', jit=False)[0].eval().requires_grad_(False).to(device))
+        if ViTL14: clip_models.append(clip.load('ViT-L/14', jit=False)[0].eval().requires_grad_(False).to(device))
+        if ViTL14_336px: clip_models.append(
+            clip.load('ViT-L/14@336px', jit=False)[0].eval().requires_grad_(False).to(device))
+        if RN50: clip_models.append(clip.load('RN50', jit=False)[0].eval().requires_grad_(False).to(device))
+        if RN50x4: clip_models.append(clip.load('RN50x4', jit=False)[0].eval().requires_grad_(False).to(device))
+        if RN50x16: clip_models.append(clip.load('RN50x16', jit=False)[0].eval().requires_grad_(False).to(device))
+        if RN50x64: clip_models.append(clip.load('RN50x64', jit=False)[0].eval().requires_grad_(False).to(device))
+        if RN101: clip_models.append(clip.load('RN101', jit=False)[0].eval().requires_grad_(False).to(device))
+        if ViTB32_laion2b_e16: clip_models.append(
+            open_clip.create_model('ViT-B-32', pretrained='laion2b_e16').eval().requires_grad_(False).to(device))
+        if ViTB32_laion400m_e31: clip_models.append(
+            open_clip.create_model('ViT-B-32', pretrained='laion400m_e31').eval().requires_grad_(False).to(device))
+        if ViTB32_laion400m_32: clip_models.append(
+            open_clip.create_model('ViT-B-32', pretrained='laion400m_e32').eval().requires_grad_(False).to(device))
+        if ViTB32quickgelu_laion400m_e31: clip_models.append(
+            open_clip.create_model('ViT-B-32-quickgelu', pretrained='laion400m_e31').eval().requires_grad_(False).to(
+                device))
+        if ViTB32quickgelu_laion400m_e32: clip_models.append(
+            open_clip.create_model('ViT-B-32-quickgelu', pretrained='laion400m_e32').eval().requires_grad_(False).to(
+                device))
+        if ViTB16_laion400m_e31: clip_models.append(
+            open_clip.create_model('ViT-B-16', pretrained='laion400m_e31').eval().requires_grad_(False).to(device))
+        if ViTB16_laion400m_e32: clip_models.append(
+            open_clip.create_model('ViT-B-16', pretrained='laion400m_e32').eval().requires_grad_(False).to(device))
+        if RN50_yffcc15m: clip_models.append(
+            open_clip.create_model('RN50', pretrained='yfcc15m').eval().requires_grad_(False).to(device))
+        if RN50_cc12m: clip_models.append(
+            open_clip.create_model('RN50', pretrained='cc12m').eval().requires_grad_(False).to(device))
+        if RN50_quickgelu_yfcc15m: clip_models.append(
+            open_clip.create_model('RN50-quickgelu', pretrained='yfcc15m').eval().requires_grad_(False).to(device))
+        if RN50_quickgelu_cc12m: clip_models.append(
+            open_clip.create_model('RN50-quickgelu', pretrained='cc12m').eval().requires_grad_(False).to(device))
+        if RN101_yfcc15m: clip_models.append(
+            open_clip.create_model('RN101', pretrained='yfcc15m').eval().requires_grad_(False).to(device))
+        if RN101_quickgelu_yfcc15m: clip_models.append(
+            open_clip.create_model('RN101-quickgelu', pretrained='yfcc15m').eval().requires_grad_(False).to(device))
+
+        normalize = T.Normalize(mean=[0.48145466, 0.4578275, 0.40821073], std=[0.26862954, 0.26130258, 0.27577711])
+        lpips_model = lpips.LPIPS(net='vgg').to(device)
+
+        # Update Model Settings
+        self.timestep_respacing = f'ddim{self.steps}'
+        self.diffusion_steps = (1000 // self.steps) * self.steps if self.steps < 1000 else self.steps
+        print("steps : ", self.steps)
+        self.dd = DiscoDiffusion(root_path, device, normalize, lpips_model, clip_models, self.steps)
+        self.dd.setup_model_config(self.timestep_respacing, self.diffusion_steps)
+        self.args = _build_args(self.text_prompts, self.image_prompts, self.dd.seed, self.batch_size, self.steps,
+                                self.display_rate,
+                                batch_name,
+                                width_height,
+                                tv_scale,
+                                range_scale,
+                                sat_scale, cutn_batches, init_image, init_scale, skip_steps, side_x, side_y,
+                                self.timestep_respacing,
+                                self.diffusion_steps, self.resume_run)
+
+    def run(self, image_name="image.png"):
+        self.dd.setup_output_image(image_name)
+        self.dd.do_run(self.args)
+
+    def setup_args(self, text_prompts, display_rate=20, batch_size=1, steps=steps, width_height=width_height,
+                   tv_scale=tv_scale,
+                   range_scale=range_scale,
+                   sat_scale=sat_scale, cutn_batches=cutn_batches, init_image=init_image, init_scale=init_scale,
+                   skip_steps=skip_steps, side_x=side_x,
+                   side_y=side_y,
+                   resume_run=False):
+        # Update Model Settings
+        print("setup... , steps", steps)
+        timestep_respacing = f'ddim{steps}'
+        diffusion_steps = (1000 // steps) * steps if steps < 1000 else steps
+        self.args = _build_args(text_prompts,
+                                image_prompts=self.image_prompts,
+                                seed=self.dd.seed,
+                                batch_size=batch_size,
+                                steps=steps,
+                                display_rate=display_rate,
+                                batch_name=batch_name,
+                                width_height=width_height,
+                                tv_scale=tv_scale,
+                                range_scale=range_scale,
+                                sat_scale=sat_scale,
+                                cutn_batches=cutn_batches,
+                                init_image=init_image,
+                                init_scale=init_scale,
+                                skip_steps=skip_steps,
+                                side_x=side_x,
+                                side_y=side_y,
+                                timestep_respacing=timestep_respacing,
+                                diffusion_steps=diffusion_steps,
+                                resume_run=self.resume_run)
+        self.timestep_respacing = timestep_respacing
+        self.diffusion_steps = diffusion_steps
+        self.dd.setup_model_config(timestep_respacing, diffusion_steps)
 
 
 if __name__ == '__main__':
-    root_path = os.getcwd()
-    PROJECT_DIR = os.path.abspath(root_path)
-    setup_3rd_module(PROJECT_DIR)
-    from model import *
-    from CLIP import clip
-    import open_clip
-    from guided_diffusion.script_util import create_model_and_diffusion, model_and_diffusion_defaults
-    from resize_right import resize
-    import py3d_tools as p3dT
-    import disco_xform_utils as dxf
-    from midas.dpt_depth import DPTDepthModel
-    from midas.midas_net import MidasNet
-    from midas.midas_net_custom import MidasNet_small
-    from midas.transforms import Resize, NormalizeImage, PrepareForNet
-
-    # AdaBins stuff
-    if USE_ADABINS:
-        from infer import InferenceHelper
-    MAX_ADABINS_AREA = 500000
-    device = torch.device('cuda:0' if (torch.cuda.is_available()) else 'cpu')
-    batch_size = 1
-    print('Using device:', device)
-    resume_run = False  # @param{type: 'boolean'}
-    run_to_resume = 'latest'  # @param{type: 'string'}
-    resume_from_frame = 'latest'  # @param{type: 'string'}
-    retain_overwritten_frames = False  # @param{type: 'boolean'}
-
-    text_prompts = {
-        0: [
-            "A beautiful painting of a singular lighthouse, shining its light across a tumultuous sea of blood by greg rutkowski and thomas kinkade, Trending on artstation.",
-            "yellow color scheme"],
-        100: ["This set of prompts start at frame 100", "This prompt has weight five:5"],
-    }
-
-    text_prompts = {
+    input_text = {
         0: ["A beautiful woman is skiing, and the flags of various countries are planted on the snow field",
             "white color scheme"],
     }
-    image_prompts = {
-        # 0:['ImagePromptsWorkButArentVeryGood.png:2',],
+    test_text_prompts = {
+        0: [
+            "A beautiful painting of a singular lighthouse, shining its light across a tumultuous sea of blood by greg rutkowski and thomas kinkade, Trending on artstation.",
+            "yellow color scheme"],
     }
-
-    display_rate = 20  # @param{type: 'number'}
-
-    # clip set
-    clip_models = []
-    if ViTB32: clip_models.append(clip.load('ViT-B/32', jit=False)[0].eval().requires_grad_(False).to(device))
-    if ViTB16: clip_models.append(clip.load('ViT-B/16', jit=False)[0].eval().requires_grad_(False).to(device))
-    if ViTL14: clip_models.append(clip.load('ViT-L/14', jit=False)[0].eval().requires_grad_(False).to(device))
-    if ViTL14_336px: clip_models.append(
-        clip.load('ViT-L/14@336px', jit=False)[0].eval().requires_grad_(False).to(device))
-    if RN50: clip_models.append(clip.load('RN50', jit=False)[0].eval().requires_grad_(False).to(device))
-    if RN50x4: clip_models.append(clip.load('RN50x4', jit=False)[0].eval().requires_grad_(False).to(device))
-    if RN50x16: clip_models.append(clip.load('RN50x16', jit=False)[0].eval().requires_grad_(False).to(device))
-    if RN50x64: clip_models.append(clip.load('RN50x64', jit=False)[0].eval().requires_grad_(False).to(device))
-    if RN101: clip_models.append(clip.load('RN101', jit=False)[0].eval().requires_grad_(False).to(device))
-    if ViTB32_laion2b_e16: clip_models.append(
-        open_clip.create_model('ViT-B-32', pretrained='laion2b_e16').eval().requires_grad_(False).to(device))
-    if ViTB32_laion400m_e31: clip_models.append(
-        open_clip.create_model('ViT-B-32', pretrained='laion400m_e31').eval().requires_grad_(False).to(device))
-    if ViTB32_laion400m_32: clip_models.append(
-        open_clip.create_model('ViT-B-32', pretrained='laion400m_e32').eval().requires_grad_(False).to(device))
-    if ViTB32quickgelu_laion400m_e31: clip_models.append(
-        open_clip.create_model('ViT-B-32-quickgelu', pretrained='laion400m_e31').eval().requires_grad_(False).to(
-            device))
-    if ViTB32quickgelu_laion400m_e32: clip_models.append(
-        open_clip.create_model('ViT-B-32-quickgelu', pretrained='laion400m_e32').eval().requires_grad_(False).to(
-            device))
-    if ViTB16_laion400m_e31: clip_models.append(
-        open_clip.create_model('ViT-B-16', pretrained='laion400m_e31').eval().requires_grad_(False).to(device))
-    if ViTB16_laion400m_e32: clip_models.append(
-        open_clip.create_model('ViT-B-16', pretrained='laion400m_e32').eval().requires_grad_(False).to(device))
-    if RN50_yffcc15m: clip_models.append(
-        open_clip.create_model('RN50', pretrained='yfcc15m').eval().requires_grad_(False).to(device))
-    if RN50_cc12m: clip_models.append(
-        open_clip.create_model('RN50', pretrained='cc12m').eval().requires_grad_(False).to(device))
-    if RN50_quickgelu_yfcc15m: clip_models.append(
-        open_clip.create_model('RN50-quickgelu', pretrained='yfcc15m').eval().requires_grad_(False).to(device))
-    if RN50_quickgelu_cc12m: clip_models.append(
-        open_clip.create_model('RN50-quickgelu', pretrained='cc12m').eval().requires_grad_(False).to(device))
-    if RN101_yfcc15m: clip_models.append(
-        open_clip.create_model('RN101', pretrained='yfcc15m').eval().requires_grad_(False).to(device))
-    if RN101_quickgelu_yfcc15m: clip_models.append(
-        open_clip.create_model('RN101-quickgelu', pretrained='yfcc15m').eval().requires_grad_(False).to(device))
-
-    normalize = T.Normalize(mean=[0.48145466, 0.4578275, 0.40821073], std=[0.26862954, 0.26130258, 0.27577711])
-    lpips_model = lpips.LPIPS(net='vgg').to(device)
-
-    if set_seed == 'random_seed':
-        random.seed()
-        seed = random.randint(0, 2 ** 32)
-        # print(f'Using seed: {seed}')
-    else:
-        seed = int(set_seed)
-
-    runner = DiscoDiffusionRunner(root_path, device)
-    runner.run()
+    ds = DDRunner(input_text)
+    #     def setup_args(self, text_prompts, display_rate=20, batch_size=1, steps=steps, width_height=width_height,
+    #                    tv_scale=tv_scale,
+    #                    range_scale=range_scale,
+    #                    sat_scale=sat_scale, cutn_batches=cutn_batches, init_image=init_image, init_scale=init_scale,
+    #                    skip_steps=skip_steps, side_x=side_x,
+    #                    side_y=side_y, timestep_respacing=f'ddim{steps}',
+    #                    diffusion_steps=(1000 // steps) * steps if steps < 1000 else steps,
+    #                    resume_run=False):
+    ds.setup_args(test_text_prompts, width_height=[1280, 768], steps=50)
+    ds.run("image2.png")
