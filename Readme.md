@@ -20,7 +20,11 @@ i split some implements, and using some class to wrapper the main logic...
 ## pull from docker hub
 the image is so big which have the whole models that you don't need to download..
 
-```docker pull iflyopensource/disco_diffusion:v2```
+```
+docker pull iflyopensource/disco_diffusion:v2
+cd /home/aiges/disco
+python run.py
+```
 
 ## or you can build  docker image
 
