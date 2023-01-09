@@ -420,6 +420,7 @@ class DiscoDiffusion():
         args = SimpleNamespace(**args)
         self.args = args
         self.steps = args.steps
+        self.eta = args.eta
         print('Prepping model...')
         model, diffusion = create_model_and_diffusion(**self.model_config)
         if diffusion_model == 'custom':
@@ -698,7 +699,7 @@ class DiscoDiffusion():
                         skip_timesteps=skip_steps,
                         init_image=init,
                         randomize_class=randomize_class,
-                        eta=eta,
+                        eta=args.eta,
                         transformation_fn=symmetry_transformation_fn,
                         transformation_percent=args.transformation_percent
                     )
@@ -814,7 +815,7 @@ class DiscoDiffusion():
             'seed': self.args.seed,
             'fuzzy_prompt': fuzzy_prompt,
             'rand_mag': rand_mag,
-            'eta': eta,
+            'eta': self.eta,
             'width': width_height[0],
             'height': width_height[1],
             'diffusion_model': diffusion_model,
@@ -1047,8 +1048,9 @@ def regen_perlin(batch_size=1, device='cpu'):
 def _build_args(text_prompts, image_prompts, seed, batch_size, steps, display_rate, batch_name, width_height, tv_scale,
                 range_scale,
                 sat_scale, cutn_batches, init_image, init_scale, skip_steps, side_x, side_y, timestep_respacing,
-                diffusion_steps, resume_run):
+                diffusion_steps, resume_run, eta):
     return {
+        'eta': eta,
         'resume_run': resume_run,
         'prompts_series': split_prompts(text_prompts) if text_prompts else None,
         'image_prompts_series': split_prompts(image_prompts) if image_prompts else None,
@@ -1239,7 +1241,8 @@ class DDRunner():
                    sat_scale=sat_scale, cutn_batches=cutn_batches, init_image=init_image, init_scale=init_scale,
                    skip_steps=skip_steps, side_x=side_x,
                    side_y=side_y,
-                   resume_run=False):
+                   resume_run=False,
+                   eta=eta):
         # Update Model Settings
         print("setup... , steps", steps)
         timestep_respacing = f'ddim{steps}'
@@ -1263,7 +1266,8 @@ class DDRunner():
                                 side_y=side_y,
                                 timestep_respacing=timestep_respacing,
                                 diffusion_steps=diffusion_steps,
-                                resume_run=self.resume_run)
+                                resume_run=self.resume_run,
+                                eta=eta)
         self.timestep_respacing = timestep_respacing
         self.diffusion_steps = diffusion_steps
         self.dd.setup_model_config(timestep_respacing, diffusion_steps)
